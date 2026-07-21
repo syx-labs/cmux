@@ -157,7 +157,10 @@ Para mais informações sobre como configurar o cmux, [acesse nossa documentaç�
 | ⌃ ⌘ [ | Workspace anterior |
 | ⌘ ⇧ W | Fechar workspace |
 | ⌘ ⇧ R | Renomear workspace |
+| ⌥ ⌘ E | Editar descrição do workspace |
 | ⌘ B | Alternar barra lateral |
+| ⌥ ⌘ B | Alternar barra lateral direita |
+| ⌘ ⇧ E | Alternar foco da barra lateral direita |
 
 ### Superfícies
 
@@ -184,6 +187,7 @@ Para mais informações sobre como configurar o cmux, [acesse nossa documentaç�
 ### Navegador
 
 Os atalhos de ferramentas do desenvolvedor do navegador seguem os padrões do Safari e podem ser personalizados em `Configurações → Atalhos de Teclado`.
+Os atalhos de navegação da paleta de comandos, incluindo ⌃ P, também são personalizáveis e podem ser limpos para que a tecla pressionada chegue ao terminal ativo.
 
 | Atalho | Ação |
 |----------|--------|
@@ -201,14 +205,17 @@ Os atalhos de ferramentas do desenvolvedor do navegador seguem os padrões do Sa
 |----------|--------|
 | ⌘ I | Mostrar painel de notificações |
 | ⌘ ⇧ U | Ir para última não lida |
+| ⌥ ⌘ U | Alternar estado de não lida do item atual |
+| ⌃ ⌘ U | Marcar item atual como não lida mais antiga e ir para a próxima não lida mais recente |
 
 ### Busca
 
 | Atalho | Ação |
 |----------|--------|
 | ⌘ F | Buscar |
-| ⌘ G / ⌘ ⇧ G | Buscar próximo / anterior |
-| ⌘ ⇧ F | Ocultar barra de busca |
+| ⌘ ⇧ F | Buscar no diretório |
+| ⌘ G / ⌥ ⌘ G | Buscar próximo / anterior |
+| ⌥ ⌘ ⇧ F | Ocultar barra de busca |
 | ⌘ E | Usar seleção para busca |
 
 ### Terminal
@@ -226,6 +233,7 @@ Os atalhos de ferramentas do desenvolvedor do navegador seguem os padrões do Sa
 | Atalho | Ação |
 |----------|--------|
 | ⌘ ⇧ N | Nova janela |
+| ⌘ ⇧ O | Reabrir sessão anterior |
 | ⌘ , | Configurações |
 | ⌘ ⇧ , | Recarregar configuração |
 | ⌘ Q | Sair |
@@ -235,6 +243,8 @@ Os atalhos de ferramentas do desenvolvedor do navegador seguem os padrões do Sa
 [Baixar cmux NIGHTLY](https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos.dmg)
 
 O cmux NIGHTLY é um app separado com seu próprio bundle ID, então roda ao lado da versão estável. Construído automaticamente a partir do último commit em `main` e se atualiza automaticamente via seu próprio feed Sparkle.
+
+Reporte bugs do nightly nas [GitHub Issues](https://github.com/manaflow-ai/cmux/issues) ou em [#nightly-bugs no Discord](https://discord.gg/xsgFEVrWCZ).
 
 ## Restauração de sessão
 
@@ -246,13 +256,16 @@ Ao sair, o cmux salva a sessão atual. Ao abrir novamente, o cmux restaura o est
 
 O cmux não cria checkpoints de processos ativos arbitrários. tmux, vim, shells e apps de terminal sem suporte reabrem como terminais normais.
 
-Sessões de agentes compatíveis podem ser retomadas quando os hooks salvam um ID de sessão nativo:
+Sessões de agentes compatíveis podem ser retomadas quando os hooks salvam um ID de sessão nativo.
+Instale os hooks depois de instalar a CLI do agente, para que o binário esteja no `PATH`:
 
 ```bash
 cmux hooks setup
 cmux hooks setup codex
 cmux hooks setup --agent opencode
 ```
+
+O `cmux hooks setup` instala os agentes compatíveis que encontrar e exibe um resumo dos agentes ignorados. As integrações de retomada compatíveis incluem Claude Code, Codex, Grok, OpenCode, Pi, Amp, Cursor CLI, Gemini, Rovo Dev, Copilot, CodeBuddy, Factory e Qoder. O Claude Code é tratado pelo wrapper Claude do cmux quando a integração com o Claude está habilitada nas Configurações.
 
 Usuários avançados e integrações podem associar um comando personalizado de retomada à surface de terminal atual. Isso é útil para ferramentas com estado durável próprio, como sessões tmux ou CLIs de agentes customizados:
 
@@ -262,7 +275,34 @@ cmux surface resume show --json
 cmux surface resume clear --checkpoint work
 ```
 
-A associação fica ligada à surface do cmux. Associações criadas pela CLI pública ou pelo socket são salvas para inspeção e retomada manual. O cmux só executa automaticamente associações de retomada que marca como confiáveis, como associações tmux detectadas a partir de processos ativos. Chaves de ambiente sensíveis, como tokens, senhas, segredos e chaves de API, são descartadas antes de salvar uma associação de retomada.
+A associação fica ligada à surface do cmux. Associações criadas pela CLI pública ou pelo socket são salvas para inspeção e retomada manual, a menos que você aprove um prefixo de comando assinado para retomada automática. Prefixos aprovados também são vinculados ao diretório de trabalho e aos valores exatos de ambiente, quando presentes. Revise ou edite as aprovações em **Configurações > Terminal > Comandos de Retomada**. O cmux só executa automaticamente associações de retomada que marca como confiáveis, como associações tmux detectadas a partir de processos ativos ou prefixos aprovados pelo usuário. Chaves de ambiente sensíveis, como tokens, senhas, segredos e chaves de API, são descartadas antes de salvar uma associação de retomada.
+
+Para manter os terminais de agentes restaurados ociosos em vez de executar automaticamente seus comandos de retomada,
+desligue **Configurações > Terminal > Retomar Sessões de Agentes ao Reabrir** ou defina isto em
+`~/.config/cmux/cmux.json`:
+
+```json
+{
+  "terminal": {
+    "autoResumeAgentSessions": false
+  }
+}
+```
+
+Isso desativa apenas os comandos automáticos de retomada de agentes. O cmux ainda restaura o layout salvo,
+os diretórios de trabalho, o histórico de rolagem e o histórico do navegador.
+
+Se você precisar reaplicar manualmente o último snapshot salvo, use:
+- `Arquivo > Reabrir Sessão Anterior`
+- `⌘ ⇧ O`
+- `cmux restore-session`
+
+Nos bastidores, o cmux grava um snapshot versionado em
+`~/Library/Application Support/cmux/` e os hooks de agentes gravam mapeamentos de sessão
+em `~/.cmuxterm/`. Na restauração, o cmux reconstrói o layout primeiro e depois executa o
+comando de retomada nativo do agente compatível quando a retomada automática de agentes está habilitada.
+
+Leia o guia completo em <https://cmux.com/docs/session-restore>.
 
 ## Histórico de Estrelas
 
