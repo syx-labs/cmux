@@ -80,6 +80,21 @@ struct KanbanBoardRepositoryTests {
     }
 
     @Test
+    func loadThrowsOnZeroByteBoardFile() async throws {
+        let base = makeTempBaseDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let repo = KanbanBoardRepository(baseDirectory: base)
+        let workspaceId = UUID()
+
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        try Data().write(to: await repo.boardURL(workspaceId: workspaceId))
+
+        await #expect(throws: KanbanBoardRepositoryError.corruptedBoardFile(workspaceId: workspaceId)) {
+            _ = try await repo.load(workspaceId: workspaceId, now: Self.fixedNow)
+        }
+    }
+
+    @Test
     func appendLogAccumulatesAcrossCalls() async throws {
         let base = makeTempBaseDirectory()
         defer { try? FileManager.default.removeItem(at: base) }

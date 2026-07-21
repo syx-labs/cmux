@@ -67,6 +67,9 @@ reviews:
     - path: "cmuxTests/**"
       instructions: |
         Apply `.github/review-bot-rules/swift-test-pbxproj-wiring.md` during review. Flag a new `.swift` file under `cmuxTests/` or `cmuxUITests/` that lacks a matching `PBXFileReference` + `PBXSourcesBuildPhase` entry in `cmux.xcodeproj/project.pbxproj` in the same diff — Xcode silently never runs it ("Executed 0 tests"), so a regression test passes as a no-op. Pass for SPM-package `Tests/` files, which need no pbxproj entry.
+    - path: "cmuxUITests/**"
+      instructions: |
+        Apply `.github/review-bot-rules/swift-test-pbxproj-wiring.md` during review. Flag a new `.swift` file under `cmuxTests/` or `cmuxUITests/` that lacks a matching `PBXFileReference` + `PBXSourcesBuildPhase` entry in `cmux.xcodeproj/project.pbxproj` in the same diff — Xcode silently never runs it ("Executed 0 tests"), so a regression test passes as a no-op. Pass for SPM-package `Tests/` files, which need no pbxproj entry.
     - path: "cmux.xcodeproj/**"
       instructions: |
         Apply `.github/review-bot-rules/swift-test-pbxproj-wiring.md` and `.github/review-bot-rules/swift-workspace-package-group-mirroring.md` during review. Verify new test files are wired into the test target, and that package-reference / group changes mirror the physical `Packages/{Shared,iOS,macOS}/` layout.

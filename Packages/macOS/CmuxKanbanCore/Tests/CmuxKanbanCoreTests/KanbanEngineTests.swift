@@ -240,6 +240,45 @@ struct KanbanEngineTests {
     }
 
     @Test
+    func cancelDuringSuspendedDispatchTearsDownAndRequeuesToReady() async throws {
+        // Regression: dispatch() commits the card to .building, then suspends on
+        // `await backend.dispatch(...)` and only registers handles[cardId] AFTER
+        // it returns. A cancel that interleaves during that suspension used to hit
+        // the no-handle early return and was silently dropped — leaving the card
+        // stuck in .building with the backend run never cancelled.
+        let backend = ScriptedDispatchBackend(
+            script: [.started(sessionId: "s")],
+            finishes: false,
+            gated: true
+        )
+        let (engine, _, base, _) = try await makeEngine(backend: backend)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let created = await engine.createTask(title: "Task")
+        let cardId = created.cards[0].id
+
+        // Start the dispatch; it parks inside the gated backend, suspended exactly
+        // at the `await backend.dispatch(...)` point — before the handle exists.
+        let dispatchTask = Task { try await engine.dispatch(cardId: cardId) }
+        await backend.waitUntilDispatchParked()
+
+        // Cancel while the dispatch is suspended and no handle is registered yet.
+        await engine.cancel(cardId: cardId)
+
+        // Let the dispatch resume and complete its teardown.
+        await backend.resumeDispatch()
+        try await dispatchTask.value
+
+        let board = await engine.currentBoard()
+        // The card must end re-queued to .ready, not stuck in .building.
+        #expect(board.card(id: cardId)?.column == .ready)
+        #expect(board.card(id: cardId)?.sessionId == nil)
+        // The freshly-started backend run must have been cancelled, not orphaned.
+        let cancelled = await backend.cancelledCount()
+        #expect(cancelled == 1)
+    }
+
+    @Test
     func dispatchLiveRoutesRunAndCancelToTheLiveBackend() async throws {
         let headless = ScriptedDispatchBackend(script: [.started(sessionId: "h")], finishes: false)
         let live = ScriptedDispatchBackend(script: [.started(sessionId: "l")], finishes: false)

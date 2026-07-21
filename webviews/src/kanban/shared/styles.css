@@ -161,7 +161,8 @@ body {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.3;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .kanban-card__detail {
@@ -169,7 +170,8 @@ body {
   line-height: 1.35;
   color: var(--agent-soft, rgba(128, 128, 128, 0.85));
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .kanban-card__footer {
@@ -209,7 +211,8 @@ body {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   color: var(--agent-muted, rgba(128, 128, 128, 0.85));
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
   max-height: 3.6em;
   overflow: hidden;
 }

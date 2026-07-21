@@ -29,6 +29,12 @@ public actor KanbanEngine {
     /// started the run so ``cancel(cardId:)`` routes back to the right one
     /// (headless vs live).
     private var handles: [UUID: (handle: KanbanDispatchHandle, backend: any DispatchBackend)] = [:]
+    /// Cards whose ``cancel(cardId:)`` arrived while the dispatch was suspended
+    /// inside `await backend.dispatch(...)`, before the handle was registered.
+    /// ``dispatch(cardId:using:)`` consumes the flag once the backend returns and
+    /// tears the run down instead of registering it, so an interleaved cancel is
+    /// never silently dropped.
+    private var pendingCancels: Set<UUID> = []
 
     /// A board snapshot emitted after every mutation. The latest value is the
     /// authoritative board; subscribers reconcile from it.
@@ -154,6 +160,23 @@ public actor KanbanEngine {
             return
         }
 
+        // A cancel that interleaved during `await backend.dispatch(...)` recorded
+        // its intent here (the handle did not exist yet, so it could not route to
+        // the backend). Honour it now: tear the freshly-started run down instead
+        // of registering it, rolling the card back to `ready` if it still holds a
+        // WIP slot. Without this the cancel is silently dropped and the card is
+        // stuck in `building` with the backend still running.
+        if pendingCancels.remove(cardId) != nil {
+            await backend.cancel(session.handle)
+            if var card = board.card(id: cardId), card.column.occupiesWipSlot {
+                card.column = .ready
+                card.sessionId = nil
+                await commit(board.upserting(card, now: clock()))
+            }
+            cleanup(cardId)
+            return
+        }
+
         handles[cardId] = (session.handle, backend)
         let token = session.handle.token
         let task = Task { [weak self] in
@@ -173,7 +196,20 @@ public actor KanbanEngine {
     /// and are discarded — a cancelled card can never be silently resurrected by
     /// a late `started`/`output` event.
     public func cancel(cardId: UUID) async {
-        guard let (handle, backend) = handles[cardId] else { return }
+        guard let (handle, backend) = handles[cardId] else {
+            // No handle yet: a dispatch may be suspended inside
+            // `await backend.dispatch(...)`. If the card is in flight, record the
+            // cancel intent and re-queue it so the dispatch path tears the run
+            // down once the backend returns, instead of silently dropping it.
+            if let card = board.card(id: cardId), card.column.occupiesWipSlot {
+                pendingCancels.insert(cardId)
+                var requeued = card
+                requeued.column = .ready
+                requeued.sessionId = nil
+                await commit(board.upserting(requeued, now: clock()))
+            }
+            return
+        }
         let task = runningTasks[cardId]
         cleanup(cardId)
         task?.cancel()
@@ -261,6 +297,9 @@ public actor KanbanEngine {
     private func cleanup(_ cardId: UUID) {
         runningTasks[cardId] = nil
         handles[cardId] = nil
+        // Drop any recorded cancel intent so a stale pending-cancel cannot
+        // resurface and tear down a later re-dispatch of the same card.
+        pendingCancels.remove(cardId)
     }
 
     /// Reassigns the board (synchronously, before any `await`), publishes the

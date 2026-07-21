@@ -11,15 +11,37 @@ import Foundation
 actor ScriptedDispatchBackend: DispatchBackend {
     private let script: [KanbanDispatchProgress]
     private let finishes: Bool
+    /// When true, ``dispatch(card:workingDirectory:)`` suspends inside its body
+    /// until ``resumeDispatch()`` is called, so a test can interleave a cancel
+    /// while the engine is parked on `await backend.dispatch(...)`.
+    private let gated: Bool
     private var open: [KanbanDispatchHandle: AsyncStream<KanbanDispatchProgress>.Continuation] = [:]
     private(set) var cancelledHandles: [KanbanDispatchHandle] = []
 
-    init(script: [KanbanDispatchProgress], finishes: Bool = true) {
+    /// Continuations resumed by ``resumeDispatch()``; signals that
+    /// ``dispatch(card:workingDirectory:)`` has parked.
+    private var gateContinuations: [CheckedContinuation<Void, Never>] = []
+    /// Set once ``dispatch(card:workingDirectory:)`` has parked on the gate, so a
+    /// test can `await` until the engine is actually suspended before cancelling.
+    private var parkedContinuations: [CheckedContinuation<Void, Never>] = []
+    private var hasParked = false
+
+    init(script: [KanbanDispatchProgress], finishes: Bool = true, gated: Bool = false) {
         self.script = script
         self.finishes = finishes
+        self.gated = gated
     }
 
     func dispatch(card: KanbanCard, workingDirectory: String?) async throws -> KanbanDispatchSession {
+        if gated {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                gateContinuations.append(continuation)
+                hasParked = true
+                let waiters = parkedContinuations
+                parkedContinuations.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
         let handle = KanbanDispatchHandle(cardId: card.id)
         var continuation: AsyncStream<KanbanDispatchProgress>.Continuation!
         let stream = AsyncStream<KanbanDispatchProgress> { continuation = $0 }
@@ -30,6 +52,21 @@ actor ScriptedDispatchBackend: DispatchBackend {
             open[handle] = continuation
         }
         return KanbanDispatchSession(handle: handle, progress: stream)
+    }
+
+    /// Suspends until ``dispatch(card:workingDirectory:)`` has parked on the gate.
+    func waitUntilDispatchParked() async {
+        if hasParked { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            parkedContinuations.append(continuation)
+        }
+    }
+
+    /// Releases a gated ``dispatch(card:workingDirectory:)`` so it returns.
+    func resumeDispatch() {
+        let pending = gateContinuations
+        gateContinuations.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 
     func cancel(_ handle: KanbanDispatchHandle) async {

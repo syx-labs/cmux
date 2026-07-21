@@ -80,7 +80,7 @@ public actor KanbanBoardRepository {
             return KanbanBoard.empty(workspaceId: workspaceId, now: now)
         }
         if data.isEmpty {
-            return KanbanBoard.empty(workspaceId: workspaceId, now: now)
+            throw KanbanBoardRepositoryError.corruptedBoardFile(workspaceId: workspaceId)
         }
         do {
             return try decoder.decode(KanbanBoard.self, from: data)

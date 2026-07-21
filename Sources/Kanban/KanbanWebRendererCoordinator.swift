@@ -511,8 +511,8 @@ final class KanbanWebRendererCoordinator: NSObject, WKNavigationDelegate, WKUIDe
     private func startedEngine() async throws -> KanbanEngine {
         let engine = ensureEngine()
         if !didStartEngine {
-            didStartEngine = true
             _ = try await engine.start()
+            didStartEngine = true
         }
         return engine
     }

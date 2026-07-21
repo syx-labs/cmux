@@ -42,8 +42,11 @@ struct ClaudeStreamJSONAccumulator {
            object["type"] as? String == "result",
            let result = object["result"] as? String,
            !result.isEmpty {
+            // Mark the turn as having produced text but do NOT reset here: keeping
+            // the flag set lets an immediate duplicate of this same `result` line
+            // fall through to the turn-completion reset below (which emits nothing),
+            // while a genuinely new turn clears the flag when it terminates.
             emittedAnyAssistantText = true
-            resetTurnTracking()
             return [result]
         }
 
@@ -186,6 +189,12 @@ struct ClaudeStreamJSONAccumulator {
         messageIDOrder.removeAll(keepingCapacity: true)
         currentMessageID = nil
         pendingDeltaCharacterCount = 0
+        // The accumulator is per-session and `claude` runs persistent across many
+        // turns. Clearing this on every turn completion re-arms the top-level
+        // `result` fallback for the next turn; leaving it set would permanently
+        // kill the fallback after the first turn that emitted assistant text,
+        // silently dropping later result-only turns' output.
+        emittedAnyAssistantText = false
     }
 
     private static func contentText(from content: Any?) -> String {

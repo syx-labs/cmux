@@ -669,6 +669,28 @@ struct CodexAppServerSessionTests {
     }
 
     @Test
+    func testClaudeStreamJSONAccumulatorReArmsResultFallbackForLaterResultOnlyTurns() {
+        var accumulator = ClaudeStreamJSONAccumulator()
+
+        // The accumulator is per-session and `claude` runs persistent across turns.
+        // Turn 1 streams assistant text and completes via a top-level terminator.
+        expectEqual(
+            accumulator.consumeLine(
+                #"{"type":"content_block_delta","delta":{"type":"text_delta","text":"turn one"}}"#),
+            ["turn one"]
+        )
+        expectEqual(accumulator.consumeLine(#"{"type":"message_stop"}"#), [])
+
+        // Turn 2 emits no assistant text — only a top-level `result`. Its output
+        // must still surface; before the fix the turn-1 text flag stayed set and
+        // permanently disabled this fallback, silently dropping turn 2's output.
+        expectEqual(
+            accumulator.consumeLine(#"{"type":"result","subtype":"success","result":"turn two"}"#),
+            ["turn two"]
+        )
+    }
+
+    @Test
     func testClaudeStreamJSONAccumulatorDoesNotDuplicateFinalAssistantMessageAfterDeltas() {
         var accumulator = ClaudeStreamJSONAccumulator()
 
