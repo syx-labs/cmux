@@ -603,6 +603,10 @@ extension Workspace {
                 workingDirectory: directory
             )
             projectSnapshot = nil
+        case .kanban:
+            // The board persists to ~/.local/state/cmux/kanban; the open panel
+            // surface itself is not restored across relaunch in this phase.
+            return nil
         case .project:
             guard let projectPanel = panel as? ProjectPanel else { return nil }
             terminalSnapshot = nil
@@ -1491,6 +1495,8 @@ extension Workspace {
             applySessionPanelMetadata(snapshot, toPanelId: projectPanel.id)
             return projectPanel.id
         case .extensionBrowser:
+            return nil
+        case .kanban:
             return nil
         }
     }
@@ -3789,6 +3795,8 @@ final class Workspace: Identifiable, ObservableObject {
             return SurfaceKind.project.rawValue
         case .extensionBrowser:
             return SurfaceKind.extensionBrowser.rawValue
+        case .kanban:
+            return SurfaceKind.kanban.rawValue
         }
     }
 
@@ -8189,6 +8197,80 @@ final class Workspace: Identifiable, ObservableObject {
         return toolPanel
     }
 
+    /// Inserts an already-constructed surface `panel` into this workspace's
+    /// tab/pane bookkeeping and returns the new tab id (or nil if the Bonsplit
+    /// tab could not be created, after rolling the registration back).
+    ///
+    /// This is the single shared body behind every `newXSurface` method:
+    /// registering the panel, opening its tab with rollback, wiring
+    /// `surfaceIdToPanelId`, optional reorder, lifecycle publish, and the
+    /// focus-or-preserve-focus branch all live here so those semantics stay
+    /// identical across surface types. Callers build the typed panel, call this,
+    /// and run any per-type tail (e.g. agent-session subscriptions).
+    @discardableResult
+    private func installNewSurface(
+        _ panel: any Panel,
+        inPane paneId: PaneID,
+        surfaceKind: String,
+        publishKind: String,
+        publishOrigin: String,
+        directory: String,
+        focus: Bool?,
+        targetIndex: Int?
+    ) -> TabID? {
+        let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
+        let previousFocusedPanelId = focusedPanelId
+        let previousHostedView = focusedTerminalPanel?.hostedView
+
+        panels[panel.id] = panel
+        panelTitles[panel.id] = panel.displayTitle
+        if !directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            panelDirectories[panel.id] = directory
+        }
+
+        guard let newTabId = bonsplitController.createTab(
+            title: panel.displayTitle,
+            icon: panel.displayIcon,
+            kind: surfaceKind,
+            isDirty: panel.isDirty,
+            isLoading: false,
+            isPinned: false,
+            inPane: paneId
+        ) else {
+            panels.removeValue(forKey: panel.id)
+            panelTitles.removeValue(forKey: panel.id)
+            panelDirectories.removeValue(forKey: panel.id)
+            return nil
+        }
+
+        surfaceIdToPanelId[newTabId] = panel.id
+        if let targetIndex {
+            _ = bonsplitController.reorderTab(newTabId, toIndex: targetIndex)
+        }
+        publishCmuxSurfaceCreated(
+            panel.id,
+            paneId: paneId,
+            kind: publishKind,
+            origin: publishOrigin,
+            focused: shouldFocusNewTab
+        )
+
+        if shouldFocusNewTab {
+            bonsplitController.focusPane(paneId)
+            bonsplitController.selectTab(newTabId)
+            panel.focus()
+            applyTabSelection(tabId: newTabId, inPane: paneId)
+        } else {
+            preserveFocusAfterNonFocusSplit(
+                preferredPanelId: previousFocusedPanelId,
+                splitPanelId: panel.id,
+                previousHostedView: previousHostedView
+            )
+        }
+
+        return newTabId
+    }
+
     @discardableResult
     func newAgentSessionSurface(
         inPane paneId: PaneID,
@@ -8196,67 +8278,62 @@ final class Workspace: Identifiable, ObservableObject {
         rendererKind: AgentSessionRendererKind,
         workingDirectory: String? = nil,
         focus: Bool? = nil,
-        targetIndex: Int? = nil
+        targetIndex: Int? = nil,
+        liveLaunch: AgentSessionLiveLaunch? = nil
     ) -> AgentSessionPanel? {
-        let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
-        let previousFocusedPanelId = focusedPanelId
-        let previousHostedView = focusedTerminalPanel?.hostedView
         let directory = workingDirectory ?? currentDirectory
-
         let agentPanel = AgentSessionPanel(
             workspaceId: id,
             rendererKind: rendererKind,
             initialProviderID: providerID,
-            workingDirectory: directory
+            workingDirectory: directory,
+            liveLaunch: liveLaunch
         )
-        panels[agentPanel.id] = agentPanel
-        panelTitles[agentPanel.id] = agentPanel.displayTitle
-        if !directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            panelDirectories[agentPanel.id] = directory
-        }
-
-        guard let newTabId = bonsplitController.createTab(
-            title: agentPanel.displayTitle,
-            icon: agentPanel.displayIcon,
-            kind: SurfaceKind.agentSession.rawValue,
-            isDirty: agentPanel.isDirty,
-            isLoading: false,
-            isPinned: false,
-            inPane: paneId
-        ) else {
-            panels.removeValue(forKey: agentPanel.id)
-            panelTitles.removeValue(forKey: agentPanel.id)
+        guard installNewSurface(
+            agentPanel,
+            inPane: paneId,
+            surfaceKind: SurfaceKind.agentSession.rawValue,
+            publishKind: "agent_session",
+            publishOrigin: "agent_session_tab",
+            directory: directory,
+            focus: focus,
+            targetIndex: targetIndex
+        ) != nil else {
             return nil
-        }
-
-        surfaceIdToPanelId[newTabId] = agentPanel.id
-        if let targetIndex {
-            _ = bonsplitController.reorderTab(newTabId, toIndex: targetIndex)
-        }
-        publishCmuxSurfaceCreated(
-            agentPanel.id,
-            paneId: paneId,
-            kind: "agent_session",
-            origin: "agent_session_tab",
-            focused: shouldFocusNewTab
-        )
-
-        if shouldFocusNewTab {
-            bonsplitController.focusPane(paneId)
-            bonsplitController.selectTab(newTabId)
-            agentPanel.focus()
-            applyTabSelection(tabId: newTabId, inPane: paneId)
-        } else {
-            preserveFocusAfterNonFocusSplit(
-                preferredPanelId: previousFocusedPanelId,
-                splitPanelId: agentPanel.id,
-                previousHostedView: previousHostedView
-            )
         }
 
         installAgentSessionPanelSubscription(agentPanel)
 
         return agentPanel
+    }
+
+    @discardableResult
+    func newKanbanSurface(
+        inPane paneId: PaneID,
+        workingDirectory: String? = nil,
+        focus: Bool? = nil,
+        targetIndex: Int? = nil
+    ) -> KanbanPanel? {
+        let directory = workingDirectory ?? currentDirectory
+        let kanbanPanel = KanbanPanel(
+            workspaceId: id,
+            rendererKind: .react,
+            workingDirectory: directory
+        )
+        guard installNewSurface(
+            kanbanPanel,
+            inPane: paneId,
+            surfaceKind: SurfaceKind.kanban.rawValue,
+            publishKind: "kanban",
+            publishOrigin: "kanban_tab",
+            directory: directory,
+            focus: focus,
+            targetIndex: targetIndex
+        ) != nil else {
+            return nil
+        }
+
+        return kanbanPanel
     }
 
     @discardableResult

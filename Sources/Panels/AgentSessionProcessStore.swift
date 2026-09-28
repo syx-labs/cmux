@@ -3,7 +3,17 @@ import Darwin
 
 @MainActor
 final class AgentSessionProcessStore {
-    var eventSink: (([String: Any]) -> Void)?
+    private let eventFanOut = AgentSessionEventFanOut()
+
+    /// The legacy single event sink. Backed by ``AgentSessionEventFanOut`` so a
+    /// second consumer (e.g. a Kanban *live* backend observing the same process
+    /// as the visible surface renders) can attach via ``addEventObserver(_:_:)``
+    /// without displacing this one — one process, many observers, never two
+    /// spawns.
+    var eventSink: (([String: Any]) -> Void)? {
+        get { eventFanOut.reservedSink }
+        set { eventFanOut.reservedSink = newValue }
+    }
     var activeProviderSink: ((Bool) -> Void)? {
         didSet {
             emitActiveProviderStateIfNeeded()
@@ -12,6 +22,19 @@ final class AgentSessionProcessStore {
     var hasActiveProviderSession: Bool {
         !sessions.isEmpty
     }
+
+    /// Adds an additional observer of provider events, keyed by `token` (pass
+    /// `ObjectIdentifier(self)` from the observer). Every observer and the
+    /// legacy ``eventSink`` receive every event.
+    func addEventObserver(_ token: ObjectIdentifier, _ sink: @escaping ([String: Any]) -> Void) {
+        eventFanOut.addObserver(token, sink)
+    }
+
+    /// Removes the observer registered under `token`. A no-op if none is set.
+    func removeEventObserver(_ token: ObjectIdentifier) {
+        eventFanOut.removeObserver(token)
+    }
+
     private var sessions: [String: AgentSessionRunningSession] = [:]
     private var lastEmittedHasActiveProviderSession: Bool?
     private static let terminationEscalationInterval: DispatchTimeInterval = .seconds(3)
@@ -101,6 +124,9 @@ final class AgentSessionProcessStore {
 
         do {
             try process.run()
+#if DEBUG
+            cmuxDebugLog("agentSession.process.run provider=\(plan.provider.rawValue) pid=\(process.processIdentifier)")
+#endif
             emitActiveProviderStateIfNeeded()
             try await running.codexAppServerSession?.start()
         } catch {
@@ -155,15 +181,24 @@ final class AgentSessionProcessStore {
     }
 
     private func makeReadTask(_ fileHandle: FileHandle, sessionId: String, stream: String) -> Task<Void, Never> {
-        Task.detached(priority: .utility) { [weak self] in
+        let fd = fileHandle.fileDescriptor
+        return Task.detached(priority: .utility) { [weak self] in
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
             while !Task.isCancelled {
-                let data: Data
-                do {
-                    data = try fileHandle.read(upToCount: 64 * 1024) ?? Data()
-                } catch {
-                    data = Data()
+                // `FileHandle.read(upToCount:)` blocks until it accumulates the
+                // full count (or EOF), batching a streaming agent pipe into ~64KB
+                // bursts and defeating token-by-token rendering. A raw read()
+                // returns as soon as any bytes are available, so deltas surface
+                // as the agent produces them.
+                let count = buffer.withUnsafeMutableBytes { raw in
+                    Darwin.read(fd, raw.baseAddress, raw.count)
                 }
-
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    await self?.consumeOutputData(Data(), sessionId: sessionId, stream: stream)
+                    return
+                }
+                let data = count > 0 ? Data(buffer[0 ..< count]) : Data()
                 await self?.consumeOutputData(data, sessionId: sessionId, stream: stream)
                 if data.isEmpty {
                     return
@@ -297,6 +332,13 @@ final class AgentSessionProcessStore {
         if stream == "stdout",
            session.providerID == .claude {
             let completesTurn = session.claudeStreamJSONLineCompletesTurn(text)
+            for activity in session.consumeClaudeActivityLine(text) {
+                emitActivity(
+                    sessionId: session.sessionId,
+                    providerID: session.providerID,
+                    activity: activity
+                )
+            }
             for delta in session.consumeClaudeStreamJSONLine(text) {
                 emitOutput(
                     sessionId: session.sessionId,
@@ -612,7 +654,7 @@ final class AgentSessionProcessStore {
     }
 
     private func emitStarted(session: AgentSessionRunningSession) {
-        eventSink?([
+        eventFanOut.dispatch([
             "type": "provider.started",
             "sessionId": session.sessionId,
             "providerId": session.providerID.rawValue,
@@ -627,7 +669,7 @@ final class AgentSessionProcessStore {
         stream: String,
         text: String
     ) {
-        eventSink?([
+        eventFanOut.dispatch([
             "type": "provider.output",
             "sessionId": sessionId,
             "providerId": providerID.rawValue,
@@ -645,14 +687,14 @@ final class AgentSessionProcessStore {
         event["type"] = "provider.activity"
         event["sessionId"] = sessionId
         event["providerId"] = providerID.rawValue
-        eventSink?(event)
+        eventFanOut.dispatch(event)
     }
 
     private func emitTurnComplete(
         sessionId: String,
         providerID: AgentSessionProviderID
     ) {
-        eventSink?([
+        eventFanOut.dispatch([
             "type": "provider.turnComplete",
             "sessionId": sessionId,
             "providerId": providerID.rawValue
@@ -664,7 +706,7 @@ final class AgentSessionProcessStore {
         providerID: AgentSessionProviderID,
         status: Int32
     ) {
-        eventSink?([
+        eventFanOut.dispatch([
             "type": "provider.exit",
             "sessionId": sessionId,
             "providerId": providerID.rawValue,
@@ -677,5 +719,42 @@ final class AgentSessionProcessStore {
         guard lastEmittedHasActiveProviderSession != hasActiveProviderSession else { return }
         lastEmittedHasActiveProviderSession = hasActiveProviderSession
         activeProviderSink?(hasActiveProviderSession)
+    }
+}
+
+/// Fans one agent provider event out to a legacy single sink plus any number of
+/// keyed observers.
+///
+/// This is what lets a single ``AgentSessionProcessStore`` (one agent process)
+/// drive two consumers at once — the visible agent-session surface that renders
+/// the transcript *and* a Kanban live backend that maps the same events onto
+/// board progress — without ever starting the process twice.
+@MainActor
+final class AgentSessionEventFanOut {
+    /// The legacy single sink, surfaced as `AgentSessionProcessStore.eventSink`.
+    var reservedSink: (([String: Any]) -> Void)?
+    private var observers: [ObjectIdentifier: ([String: Any]) -> Void] = [:]
+
+    /// Whether any consumer is attached.
+    var hasConsumers: Bool { reservedSink != nil || !observers.isEmpty }
+
+    func addObserver(_ token: ObjectIdentifier, _ sink: @escaping ([String: Any]) -> Void) {
+        observers[token] = sink
+    }
+
+    func removeObserver(_ token: ObjectIdentifier) {
+        observers[token] = nil
+    }
+
+    /// Delivers `event` to the reserved sink and every observer.
+    ///
+    /// Iterates a snapshot of the observers, so a consumer that mutates the
+    /// observer set (or triggers a re-entrant store mutation such as `stop()`)
+    /// from inside its callback cannot corrupt the in-flight iteration.
+    func dispatch(_ event: [String: Any]) {
+        reservedSink?(event)
+        for observer in Array(observers.values) {
+            observer(event)
+        }
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 final class AgentSessionWebRendererSession {
-    private let ownedCoordinator = AgentSessionWebRendererCoordinator()
+    private let ownedCoordinator: AgentSessionWebRendererCoordinator
     var onHasActiveProviderChanged: ((Bool) -> Void)? {
         didSet {
             ownedCoordinator.onHasActiveProviderChanged = onHasActiveProviderChanged
@@ -12,6 +12,10 @@ final class AgentSessionWebRendererSession {
         didSet {
             ownedCoordinator.onProviderIDChanged = onProviderIDChanged
         }
+    }
+
+    init(liveLaunch: AgentSessionLiveLaunch? = nil) {
+        ownedCoordinator = AgentSessionWebRendererCoordinator(liveLaunch: liveLaunch)
     }
 
     func coordinator(
